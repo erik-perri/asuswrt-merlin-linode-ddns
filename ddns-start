@@ -1,0 +1,63 @@
+#!/bin/sh
+
+DOMAIN_ID=              # Domain ID, obtain from manage URL
+RECORD_HOSTNAME=        # Record hostname, should already exist and be unique for the domain
+TOKEN=                  # API Token, obtain from My Profile > API Tokens
+
+if [ -z "$DOMAIN_ID" ] || [ -z "$RECORD_HOSTNAME" ] || [ -z "$TOKEN" ]; then
+  logger -t ddns "Linode script not configured"
+  /sbin/ddns_custom_updated 0
+  return
+fi
+
+# findRecordId(jsonString)
+# Returns 0 if a record ID was echoed, 1 if no record was found, 2 if multiple were found
+findRecordId() {
+  # Extract any IDs keys found in the response into a comma separated list
+  EXTRACTED_ID=$(echo "$*" | sed 's/,/\n/g' | awk 'match($0, /"id": ([0-9]+)/) {
+    print substr($0, RSTART + 6, RLENGTH - 6)
+  }' ORS=',' | sed -e 's/^,//' -e 's/,$//')
+
+  if [ -z "$EXTRACTED_ID" ]; then
+    return 1
+  fi
+
+  if test "${EXTRACTED_ID#*","}" != "$EXTRACTED_ID"; then
+    return 2
+  fi
+
+  echo "$EXTRACTED_ID"
+  return 0
+}
+
+RECORDS_OUTPUT=$(curl -s -X GET "https://api.linode.com/v4/domains/$DOMAIN_ID/records" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-type: application/json" \
+  -H "X-Filter: {\"name\": \"$RECORD_HOSTNAME\"}")
+CURL_RETURN=$?
+if test "$CURL_RETURN" != "0"; then
+  logger -t ddns "Failed to fetch records for \"$RECORD_HOSTNAME\""
+  /sbin/ddns_custom_updated 0
+  return
+fi
+
+RECORD_ID=$(findRecordId "$RECORDS_OUTPUT")
+RECORD_RESULT=$?
+TARGET=${1}
+
+if [ $RECORD_RESULT -eq 2 ]; then
+  logger -t ddns "Multiple records for \"$RECORD_HOSTNAME\" found"
+  /sbin/ddns_custom_updated 0
+elif [ $RECORD_RESULT -eq 1 ]; then
+  logger -t ddns "No records for \"$RECORD_HOSTNAME\" found"
+  /sbin/ddns_custom_updated 0
+else
+  if curl -fs -o /dev/null -X PUT "https://api.linode.com/v4/domains/$DOMAIN_ID/records/$RECORD_ID" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-type: application/json" \
+    -d "{\"target\": \"$TARGET\"}"; then
+    logger -t ddns "Updated \"$RECORD_HOSTNAME\" to point at \"$TARGET\""
+    /sbin/ddns_custom_updated 1
+  else
+    logger -t ddns "Failed to update \"$RECORD_HOSTNAME\" to point at \"$TARGET\""
+    /sbin/ddns_custom_updated 0
+  fi
+fi
